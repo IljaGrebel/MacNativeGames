@@ -39,6 +39,27 @@ and the hardware is NVN -> Vulkan.
   distributed under GPL-3.0. The bridge talks to it only through `bridge/bridge_abi.h`, so the recompiler can be
   replaced.
 
+## Recompiler check (2026-10-24, ScarletNX 5889bb1)
+
+Verified in its source and with `probes/recomp_e2e` (ARM64 code recompiled and run against the same C compiled
+natively):
+
+| Claim | Result |
+| --- | --- |
+| LLVM, ahead of time, code for the host CPU (AVX2, AVX-512 detected) | Yes |
+| Exclusives without a global lock | Yes: `STXR` is a seq_cst compare-and-swap of the loaded value; `STXP` a 16-byte `cmpxchg16b` (their fix for TotK's lock-free lists) |
+| Guest addresses = host addresses (`cpu.mem = NULL`) | Works in the probe. Their own Switch runtime uses a base pointer, so this mode is ours to keep tested |
+| Barriers | Every `DMB`/`DSB`/`ISB` is a seq_cst fence (`mfence`), also `DMB ISHLD`/`ISHST`, which x86 does not need. Not measured yet |
+| `WFE` / `YIELD` | `WFE` is a hook the runtime supplies (ours: `WaitOnAddress`); `YIELD` is `pause` |
+| Code the static pass misses | Compiled on first use, recorded as a hint for the next ahead-of-time build |
+| Windows | COFF linker and loader in the source; the library was built and tested on Linux only here |
+| Integer code | 1.04-1.12x native |
+| Host calls through the bridge | about 3-8 ns over a native call |
+| Floating point | Exact ARM semantics, **5.5-7x slower** than native on a vectorised loop; a relaxed-FP experiment brings it to about 1x, bit-identical on that loop (details in `probes/recomp_e2e/README.md`) |
+| Licence | GPL-3.0-or-later; parts ported from QEMU (LGPL-2.1-or-later) |
+
+Relaxed floating point is the largest single performance item found so far for the 13-16 W target.
+
 ## The bridge (`bridge/`)
 
 `gen_bridge.py` writes one adapter per host function from its C prototype (`nvn_protos.h` for NVN). On the current
