@@ -60,6 +60,24 @@ natively):
 
 Relaxed floating point is the largest single performance item found so far for the 13-16 W target.
 
+## Decompilation pipeline (from M2)
+
+The recompiled game is the base and plays in full from the start. On top of it, functions move to native C++ one at
+a time, each proven equivalent before it replaces the original:
+
+1. A profile of the running game names the hottest functions; render submission first, then physics and loading.
+2. The function is decompiled to C/C++.
+3. A differential test runs the new function and the recompiled original on the same recorded inputs (the method of
+   `probes/recomp_e2e`) and compares results and memory effects.
+4. Only a match replaces the original. Render-submission functions may then talk to Vulkan directly, skipping NVN.
+
+The share of native code grows for as long as the profile shows a gain; carried far enough this becomes a full
+decompilation, with the game playable at every step. Decompiled code derives from the game's code: it stays on the
+player's machine, generated from their own files like everything else, and never enters this repository.
+
+Graphics features (upscalers, frame pacing, device profiles) and shader preparation do not depend on it: shaders are
+Maxwell binaries in the RomFS, translated to SPIR-V at build time, with pipelines built once at first launch.
+
 ## The bridge (`bridge/`)
 
 `gen_bridge.py` writes one adapter per host function from its C prototype (`nvn_protos.h` for NVN). On the current
