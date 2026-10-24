@@ -1,0 +1,19 @@
+# ScarletNX 5889bb1, GPL-3.0-or-later (ScarletNX's licence, not this repository's MIT): the relaxed-FP experiment of
+# games/totk/win/probes/recomp_e2e/README.md. Apply in a ScarletNX checkout: git apply snx-relaxed-fp.patch
+diff --git a/src/common/cpu/recompiler/llvm/ir_fp.c b/src/common/cpu/recompiler/llvm/ir_fp.c
+index d1051c5..d9b4ac7 100644
+--- a/src/common/cpu/recompiler/llvm/ir_fp.c
++++ b/src/common/cpu/recompiler/llvm/ir_fp.c
+@@ -265,6 +265,12 @@ void ir_fp_fast(SnxIr* ir, unsigned op, unsigned width, unsigned lanes, V a, V b
+     out->ok = LLVMBuildAnd(B, LLVMBuildAnd(B, rounds_to_nearest(ir), all(ir, &s, lane_and(ir, lane_in, result)), ""),
+                            exact_ok, "");
+     if (altivec_lanes(ir, width, lanes)) out->ok = LLVMConstInt(ir->t_i1, 0, 0);
++    /* EXPERIMENT (Windows port): relaxed FP - the host's IEEE result for every operand class, FPSR.IXC not tracked */
++    extern char* getenv(const char*);
++    if (getenv("SNX_FP_RELAXED")) {
++        out->ok = LLVMConstInt(ir->t_i1, 1, 0);
++        out->inexact = LLVMConstInt(ir->t_i1, 0, 0);
++    }
+ }
+ 
+ LLVMBasicBlockRef ir_fp_branch(SnxIr* ir, V ok, LLVMBasicBlockRef* slow) {
