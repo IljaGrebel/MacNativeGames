@@ -54,9 +54,18 @@ def main(argv=None) -> int:
         fonts = TOTK / "extracted/firmware/shared-fonts"
         if not (fonts / "manifest.json").exists():
             source = ["--firmware", a.firmware.resolve()] if a.firmware else ["--xci", game]
-            run("scripts/extract_shared_fonts.py", "--keys", keys, *source, "--output", fonts)
-        if not (TOTK / "build/shared_fonts_config.h").exists():
-            run("scripts/prepare_shared_fonts.py")
+            try:
+                run("scripts/extract_shared_fonts.py", "--keys", keys, *source, "--output", fonts)
+            except subprocess.CalledProcessError:
+                print("warning: no shared fonts (an NSP needs --firmware DIR); the boot goes on without them",
+                      file=sys.stderr)
+        config = TOTK / "build/shared_fonts_config.h"
+        if not config.exists():
+            if (fonts / "manifest.json").exists():
+                run("scripts/prepare_shared_fonts.py")
+            else:   # placeholders: the game only asks for the fonts once its UI starts, after M0's first NVN calls
+                config.parent.mkdir(parents=True, exist_ok=True)
+                config.write_text((Path(__file__).resolve().parents[1] / "tests/config/shared_fonts_config.h").read_text())
     nxm = v0 / "nxm"
     if not (nxm / "sdk.nxm").exists():
         run("win/tools/nso_manifest.py", nxm, v0 / "exefs/main", v0 / "exefs/subsdk0", v0 / "exefs/sdk")

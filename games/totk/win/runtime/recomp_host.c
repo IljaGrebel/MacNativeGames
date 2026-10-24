@@ -42,7 +42,12 @@ int recomp_build(RecompHost *h, const Loader *l, const char *cache_dir, unsigned
         free(hints); free(sr);
         return -1;
     }
+    if (!jobs) {   /* every core: the first build of the game's modules is long */
+        const char *e = getenv("TOTK_WIN_RECOMP_JOBS");
+        jobs = e ? (unsigned)atoi(e) : 0;
+    }
     if (jobs) snx_recompiler_set_jobs(h->r, jobs);
+    if (getenv("TOTK_WIN_RECOMP_VERBOSE")) snx_recompiler_set_verbose(h->r, 1);
     if (cache_dir) snx_recompiler_set_cache(h->r, cache_dir);
     double t0 = now_seconds();
     h->m = snx_recompile_ranges(h->r, sr, l->count + 1, hints, nhints);

@@ -12,6 +12,7 @@
  */
 #include "host_runtime.h"
 
+#include <sched.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -417,6 +418,16 @@ _Noreturn void runtime_fail(const char *message) {
 
 void runtime_startup_checkpoint(uintptr_t caller) { (void)caller; }
 
+/* WFE: the SDK's spinlocks wait with it. A spinning thread keeps its virtual core, so the thread it waits for may never
+   get one; give the core up, yield the host CPU and take a core again (what ScarletNX's own Switch runtime does). The
+   thread sleeps instead of spinning, which also saves power. */
+static void guest_wfe(CPU *c) {
+    (void)c;
+    int away = runtime_core_away();
+    sched_yield();
+    runtime_core_back(&away);
+}
+
 /* ---- loading and boot ---- */
 
 int host_runtime_load(const char *const *paths, unsigned count, const char *cache_dir) {
@@ -438,6 +449,7 @@ int host_runtime_load(const char *const *paths, unsigned count, const char *cach
     if (loader_seal(&g_loader)) { fprintf(stderr, "[totk-win] %s\n", g_loader.error); return -1; }
     if (recomp_build(&g_rh, &g_loader, cache_dir, 0)) { fprintf(stderr, "[totk-win] %s\n", g_rh.error); return -1; }
     fprintf(stderr, "[totk-win] recompiled %zu functions in %.1f s\n", g_rh.functions, g_rh.seconds);
+    ((RtAPI *)g_rh.rt)->wfe = guest_wfe;
     g_loaded = 1;
     host_thread_guest_entry = guest_entry;
     return 0;

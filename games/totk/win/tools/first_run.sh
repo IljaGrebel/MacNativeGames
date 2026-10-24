@@ -57,12 +57,13 @@ cmake --build "$CACHE/totk-win-build" --target totk-win
 
 step "boot (log: $LOG)"
 NXM="$TOTK/extracted/v0/nxm"
-export TOTK_ROMFS="$TOTK/extracted/v0/romfs" TOTK_PROFILE_DIR="$CACHE/profile"
+export TOTK_ROMFS="$TOTK/extracted/v0/romfs" TOTK_PROFILE_DIR="$CACHE/profile" TOTK_WIN_RECOMP_VERBOSE=1
+echo "The first start recompiles the game's code for this CPU (can take 10-40 minutes); later starts load it from the cache."
 mkdir -p "$TOTK_PROFILE_DIR"
 set +e
-( cd "$TOTK" && timeout 600 "$CACHE/totk-win-build/totk-win" --cache "$CACHE/code-cache" \
-    "$NXM/main.nxm" "$NXM/subsdk0.nxm" "$NXM/sdk.nxm" ) >"$LOG" 2>&1
-rc=$?
+( cd "$TOTK" && timeout 5400 "$CACHE/totk-win-build/totk-win" --cache "$CACHE/code-cache" \
+    "$NXM/main.nxm" "$NXM/subsdk0.nxm" "$NXM/sdk.nxm" ) 2>&1 | tee "$LOG" | grep --line-buffered -E "recompil|units|\[totk-win\]|ENTER|FATAL" || true
+rc=${PIPESTATUS[0]}
 set -e
 echo "exit code $rc" >>"$LOG"
 step "result"
