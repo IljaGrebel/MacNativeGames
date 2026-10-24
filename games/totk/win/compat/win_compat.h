@@ -3,6 +3,9 @@
  * files build unchanged; the stub headers in include/ stand in for the Apple headers they include.
  */
 #pragma once
+#if defined(_WIN32) && !defined(_FILE_OFFSET_BITS)
+#define _FILE_OFFSET_BITS 64   /* MinGW's off_t is 32-bit otherwise; also for the bridge generator's clang */
+#endif
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
 #endif
