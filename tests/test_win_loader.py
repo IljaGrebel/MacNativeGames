@@ -208,6 +208,45 @@ class RecompiledTests(_Fixtures):
         self.assertIn("unresolved import called: host_add", r.stdout)
 
 
+class GameConfigTests(unittest.TestCase):
+    """The prebuilt program reads romfs_config.h / shared_fonts_config.h at start (runtime/game_config.c), as the
+    preparation scripts write them, including Windows paths with backslashes."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        cc = shutil.which("clang") or shutil.which("cc")
+        self.exe = self.tmp / "game_config_test"
+        subprocess.run([cc, "-std=c11", "-O1", str(WIN / "tests/game_config_test.c"), str(WIN / "runtime/game_config.c"),
+                        "-o", str(self.exe)], check=True)
+
+    def run_with(self, romfs, fonts):
+        cfg = self.tmp / "cfg"
+        cfg.mkdir(exist_ok=True)
+        if romfs is not None: (cfg / "romfs_config.h").write_text(romfs)
+        if fonts is not None: (cfg / "shared_fonts_config.h").write_text(fonts)
+        return subprocess.run([str(self.exe)], capture_output=True, text=True, env={**os.environ, "TOTK_WIN_CONFIG_DIR": str(cfg)})
+
+    def test_reads_the_scripts_headers(self):
+        a, b = "a" * 64, "0123456789abcdef" * 4
+        romfs = f'#define ROMFS_IMAGE_SIZE 17179869184ULL\n#define ROMFS_IMAGE_SHA256 "{a}"\n#define ROMFS_INDEX_SHA256 "{b}"\n'
+        rows = ",".join(f'{{"C:\\Users\\x\\fonts\\{i}-f.bfttf",{100 + i}ULL,{92 + i}ULL,"{b}"}}' for i in range(6))
+        r = self.run_with(romfs, "#define SHARED_FONT_COUNT 6\r\n#define SHARED_FONT_ROWS " + rows + "\r\n")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("size 17179869184", r.stdout)
+        self.assertIn(f"image {a}", r.stdout)
+        self.assertIn(f"index {b}", r.stdout)
+        self.assertIn(f"font C:\\Users\\x\\fonts\\5-f.bfttf 105 97 {b}", r.stdout)
+
+    def test_a_missing_value_stops_with_its_name(self):
+        r = self.run_with('#define ROMFS_IMAGE_SIZE 4096ULL\n#define ROMFS_IMAGE_SHA256 "short"\n', None)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("ROMFS_IMAGE_SHA256", r.stderr)
+        (self.tmp / "cfg/romfs_config.h").unlink()
+        r = self.run_with(None, None)
+        self.assertIn("romfs_config.h", r.stderr)
+
+
 class BootTests(unittest.TestCase):
     """totk-win (the upstream runtime on the recompiler) boots synthetic modules that walk the real SDK's startup:
     nn::init::Start with the host's callbacks, module constructors, Horizon SVCs through the upstream dispatcher, a
@@ -229,7 +268,7 @@ class BootTests(unittest.TestCase):
             raise RuntimeError("nso_manifest failed")
         build = cls.tmp / "build"
         subprocess.run(["cmake", "-S", str(WIN), "-B", str(build), f"-DCMAKE_C_COMPILER={tools[0]}",
-                        f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_BUILD_TYPE=Release",
+                        f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_BUILD_TYPE=Release", "-DTOTK_WIN_RUNTIME_CONFIG=ON",
                         f"-DPython3_EXECUTABLE={sys.executable}"], check=True, capture_output=True)
         subprocess.run(["cmake", "--build", str(build), "--target", "totk-win"], check=True, capture_output=True)
         cls.exe = build / "totk-win"

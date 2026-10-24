@@ -47,8 +47,13 @@ if(ScarletNXRecompiler_FOUND)
   endif()
   set(TOTK_DIR ${WIN_DIR}/..)
   set(RUNTIME_DIR ${TOTK_DIR}/runtime)
+  option(TOTK_WIN_RUNTIME_CONFIG "read romfs_config.h and shared_fonts_config.h at start (TOTK_WIN_CONFIG_DIR at run
+         time) instead of compiling them in: one prebuilt program for every dump" OFF)
   set(TOTK_WIN_CONFIG_DIR "${WIN_DIR}/tests/config" CACHE PATH
       "romfs_config.h and shared_fonts_config.h made from the player's files (the tests' placeholders by default)")
+  if(TOTK_WIN_RUNTIME_CONFIG)
+    set(TOTK_WIN_CONFIG_DIR "${WIN_DIR}/compat/runtime_config" CACHE PATH "" FORCE)
+  endif()
   set(TOTK_WIN_DEFINES "" CACHE STRING "game version defines, as the Mac build passes them (e.g. TOTK_GAME_V143=1)")
   set(UPSTREAM_FLAGS "SHELL:-include ${WIN_DIR}/compat/win_compat.h" -I${WIN_DIR}/compat/include
       -I${TOTK_DIR}/third_party/d2r_gfx/gfx/nvn/include -I${RUNTIME_DIR} -I${TOTK_WIN_CONFIG_DIR})
@@ -91,6 +96,9 @@ if(ScarletNXRecompiler_FOUND)
   target_compile_options(totkwin_upstream PRIVATE ${UPSTREAM_FLAGS})
   target_include_directories(totkwin_upstream PRIVATE runtime ${BRIDGE_DIR})
   target_link_libraries(totkwin_upstream PUBLIC totkwin_recomp)
+  if(TOTK_WIN_RUNTIME_CONFIG)
+    target_sources(totkwin_upstream PRIVATE runtime/game_config.c)
+  endif()
 
   add_executable(totk-win runtime/host_runtime.c runtime/thread_enter.c runtime/platform_m0.c runtime/totk_win_main.c
                  ${CMAKE_CURRENT_BINARY_DIR}/nvn_names.inc)

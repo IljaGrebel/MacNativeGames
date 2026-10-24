@@ -9,11 +9,18 @@
 #include <stdlib.h>
 #include <string.h>
 typedef struct{const char *path;uint64_t file_bytes,font_bytes;const char *sha256;} FontRow;
+#ifdef SHARED_FONT_ROWS_AT_RUN_TIME   /* a prebuilt program (Windows port) reads the rows at start */
+static FontRow rows[SHARED_FONT_COUNT];
+#else
 static const FontRow rows[SHARED_FONT_COUNT]={SHARED_FONT_ROWS};
+#endif
 static uint8_t *region;static uint64_t offsets[SHARED_FONT_COUNT];
 static pthread_once_t once=PTHREAD_ONCE_INIT;
 static void need(int c,const char *m){if(!c)runtime_fail(m);}
 static void load(void){
+#ifdef SHARED_FONT_ROWS_AT_RUN_TIME
+ SHARED_FONT_ROWS_AT_RUN_TIME(rows);
+#endif
  uint64_t total=0;for(int i=0;i<SHARED_FONT_COUNT;i++)total+=rows[i].file_bytes;
  region=malloc(total);need(region!=NULL,"shared font memory");
  uint64_t at=0;
