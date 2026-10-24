@@ -21,7 +21,9 @@ typedef struct NxmHeader {
     uint64_t init_array_off, init_array_count;
     uint32_t nreloc, nsym, nhint, strtab_size;
     uint64_t image_offset;
+    uint32_t init_off, fini_off;   /* DT_INIT / DT_FINI, NXM_NO_INIT when absent */
 } NxmHeader;
+#define NXM_NO_INIT 0xFFFFFFFFu
 typedef struct NxmReloc { uint64_t where; uint32_t type, symbol; int64_t addend; } NxmReloc;
 typedef struct NxmSymbol { uint32_t name, flags; uint64_t value; } NxmSymbol;
 #pragma pack(pop)
@@ -65,7 +67,7 @@ static int read_file(const char *path, void **data, size_t *size) {
 static int parse(Loader *l, const char *path, const uint8_t *f, size_t n, Parsed *p) {
     if (n < NXM_HEADER_SIZE) return err(l, "%s: too small", path);
     const NxmHeader *h = (const NxmHeader *)f;
-    if (memcmp(h->magic, "NXM1", 4) || h->version != 1) return err(l, "%s: not an NXM1 file", path);
+    if (memcmp(h->magic, "NXM1", 4) || h->version != 2) return err(l, "%s: not an NXM1 version 2 file (rebuild it)", path);
     uint64_t off = NXM_HEADER_SIZE;
     uint64_t rel_size = (uint64_t)h->nreloc * sizeof(NxmReloc), sym_size = (uint64_t)h->nsym * sizeof(NxmSymbol);
     uint64_t hint_size = (uint64_t)h->nhint * 8u;
@@ -80,6 +82,9 @@ static int parse(Loader *l, const char *path, const uint8_t *f, size_t n, Parsed
         return err(l, "%s: bad segment layout", path);
     if (h->init_array_off + h->init_array_count * 8 > h->image_size || h->init_array_off % 8)
         return err(l, "%s: init array outside the image", path);
+    if ((h->init_off != NXM_NO_INIT && (h->init_off >= h->text_size || h->init_off % 4)) ||
+        (h->fini_off != NXM_NO_INIT && (h->fini_off >= h->text_size || h->fini_off % 4)))
+        return err(l, "%s: DT_INIT or DT_FINI outside text", path);
     p->h = h;
     p->relocs = (const NxmReloc *)(f + off);
     p->syms = (const NxmSymbol *)(f + off + rel_size);
@@ -131,6 +136,10 @@ uint64_t loader_symbol(const Loader *l, const char *name) {
     return s ? owner->base + s->value : 0;
 }
 
+uint64_t loader_host_stub(const Loader *l, uint32_t index) {
+    return index < l->host_count ? l->stubs + 8ull * index : 0;
+}
+
 const char *loader_unresolved_name(const Loader *l, uint32_t k) { return k < l->nunresolved ? l->unresolved[k] : NULL; }
 
 /* A stub: svc #imm; ret. The stub page is written before the recompile and never changes afterwards. */
@@ -143,22 +152,32 @@ static uint64_t add_stub(Loader *l, uint32_t imm) {
     return at;
 }
 
-typedef struct StubCache { const char *name; uint64_t address; } StubCache;
+typedef struct StubCache { const char *name; int jump_slot; int index; uint64_t address; } StubCache;
 
-static uint64_t resolve_import(Loader *l, const char *name, uint32_t flags, LoaderHostResolve resolve, void *ctx,
-                               StubCache *cache, uint32_t *ncache, uint32_t cap, int *error) {
+/* The host's implementation of `name`: its pre-made stub, or 0. */
+static uint64_t host_stub(Loader *l, const char *name, int jump_slot, LoaderHostResolve resolve, void *ctx,
+                          StubCache *cache, uint32_t *ncache, uint32_t cap, int *error) {
+    for (uint32_t i = 0; i < *ncache; i++)
+        if (cache[i].index != -2 && cache[i].jump_slot == jump_slot && !strcmp(cache[i].name, name)) return cache[i].address;
+    int index = resolve ? resolve(name, jump_slot, ctx) : -1;
+    uint64_t address = 0;
+    if (index >= 0) {
+        address = loader_host_stub(l, (uint32_t)index);
+        if (!address) { *error = err(l, "%s: host index %d outside the %u host functions", name, index, l->host_count); return 0; }
+    }
+    if (*ncache < cap) cache[(*ncache)++] = (StubCache){name, jump_slot, index, address};
+    return address;
+}
+
+static uint64_t resolve_import(Loader *l, const char *name, uint32_t flags, StubCache *cache, uint32_t *ncache,
+                               uint32_t cap, int *error) {
     const LoadedModule *owner;
     const LoaderSymbol *s = find_export(l, name, &owner);
     if (s) { l->imports_module++; return owner->base + s->value; }
     for (uint32_t i = 0; i < *ncache; i++)
-        if (!strcmp(cache[i].name, name)) { l->imports_host++; return cache[i].address; }
-    int index = resolve ? resolve(name, ctx) : -1;
+        if (cache[i].index == -2 && !strcmp(cache[i].name, name)) return cache[i].address;
     uint64_t address;
-    if (index >= 0) {
-        if ((uint32_t)index > LOADER_SVC_UNRESOLVED - LOADER_SVC_HOST - 1) { *error = err(l, "%s: host index too large", name); return 0; }
-        address = add_stub(l, LOADER_SVC_HOST + (uint32_t)index);
-        l->imports_host++;
-    } else if (flags & LOADER_SYM_WEAK) {
+    if (flags & LOADER_SYM_WEAK) {
         l->imports_weak_zero++;
         return 0;
     } else {
@@ -167,13 +186,15 @@ static uint64_t resolve_import(Loader *l, const char *name, uint32_t flags, Load
         l->unresolved[l->nunresolved++] = name;
     }
     if (!address) { *error = err(l, "stub page full"); return 0; }
-    if (*ncache < cap) cache[(*ncache)++] = (StubCache){name, address};
+    if (*ncache < cap) cache[(*ncache)++] = (StubCache){name, 0, -2, address};
     return address;
 }
 
-int loader_load(Loader *l, const char *const *paths, unsigned count, uint64_t base, LoaderHostResolve resolve, void *ctx) {
+int loader_load(Loader *l, const char *const *paths, unsigned count, uint64_t base, uint32_t host_count,
+                LoaderHostResolve resolve, void *ctx) {
     memset(l, 0, sizeof *l);
     if (count == 0 || count > LOADER_MAX_MODULES) return err(l, "module count %u", count);
+    if (host_count > LOADER_SVC_UNRESOLVED - LOADER_SVC_HOST) return err(l, "%u host functions: too many", host_count);
     Parsed parsed[LOADER_MAX_MODULES] = {{0}};
     uint64_t page = gm_page_size(), offset = 0;
     uint64_t imports_total = 0;
@@ -188,6 +209,9 @@ int loader_load(Loader *l, const char *const *paths, unsigned count, uint64_t ba
         m->text_off = h->text_off; m->text_size = h->text_size; m->ro_off = h->ro_off; m->ro_size = h->ro_size;
         m->data_off = h->data_off; m->data_size = h->data_size;
         m->init_array_off = h->init_array_off; m->init_array_count = h->init_array_count;
+        m->init = h->init_off == NXM_NO_INIT ? 0 : h->init_off;   /* module-relative here, absolute once placed */
+        m->fini = h->fini_off == NXM_NO_INIT ? 0 : h->fini_off;
+        m->has_init = h->init_off != NXM_NO_INIT; m->has_fini = h->fini_off != NXM_NO_INIT;
         m->symbols = parsed[i].symbols; m->nsym = h->nsym;
         m->hints = parsed[i].hints; m->nhint = h->nhint;
         m->base = offset;   /* relative until the reservation is placed */
@@ -195,7 +219,7 @@ int loader_load(Loader *l, const char *const *paths, unsigned count, uint64_t ba
         for (uint32_t s = 0; s < h->nsym; s++) imports_total += !(parsed[i].symbols[s].flags & LOADER_SYM_DEFINED);
     }
     l->count = count;
-    l->stubs_size = round_up((imports_total + 1) * 8, page);
+    l->stubs_size = round_up((host_count + imports_total + 1) * 8, page);
     l->size = round_up(offset + l->stubs_size, gm_reserve_granularity());
     if (!base) base = gm_find_free(0x8000000ull, GM_ADDRESS_LIMIT, l->size, LOADER_MODULE_ALIGN);
     if (!base || gm_reserve(base, l->size)) { loader_free(l); return err(l, "cannot reserve %#llx bytes for the modules: %s", (unsigned long long)l->size, gm_error()); }
@@ -204,12 +228,18 @@ int loader_load(Loader *l, const char *const *paths, unsigned count, uint64_t ba
     for (unsigned i = 0; i < count; i++) {
         LoadedModule *m = &l->modules[i];
         m->base += base;
+        if (m->has_init) m->init += m->base;
+        if (m->has_fini) m->fini += m->base;
         if (gm_commit(m->base, m->size, GM_READ | GM_WRITE)) { loader_free(l); return err(l, "%s: %s", m->name, gm_error()); }
         memcpy((void *)(uintptr_t)m->base, parsed[i].image, (size_t)m->image_size);   /* bss stays zero */
     }
     if (gm_commit(l->stubs, l->stubs_size, GM_READ | GM_WRITE)) { loader_free(l); return err(l, "stubs: %s", gm_error()); }
+    for (uint32_t i = 0; i < host_count; i++) add_stub(l, LOADER_SVC_HOST + i);
+    l->host_count = host_count;
 
-    uint32_t cap = (uint32_t)(imports_total ? imports_total : 1), ncache = 0;
+    uint64_t named = 0;
+    for (unsigned i = 0; i < count; i++) for (uint32_t r = 0; r < parsed[i].h->nreloc; r++) named += parsed[i].relocs[r].symbol != NO_SYMBOL;
+    uint32_t cap = (uint32_t)(2 * named + 1), ncache = 0;
     StubCache *cache = calloc(cap, sizeof *cache);
     if (!cache) { loader_free(l); return err(l, "out of memory"); }
     int error = 0;
@@ -223,10 +253,17 @@ int loader_load(Loader *l, const char *const *paths, unsigned count, uint64_t ba
                 value = m->base + (uint64_t)rel->addend;
             } else {
                 const LoaderSymbol *s = &m->symbols[rel->symbol];
-                uint64_t sym = (s->flags & LOADER_SYM_DEFINED)
-                                   ? m->base + s->value
-                                   : resolve_import(l, s->name, s->flags, resolve, ctx, cache, &ncache, cap, &error);
-                value = sym ? sym + (uint64_t)rel->addend : 0;   /* a weak import that stays 0 stays 0 */
+                int jump_slot = rel->type == R_JUMP_SLOT;
+                uint64_t sym = s->name[0] ? host_stub(l, s->name, jump_slot, resolve, ctx, cache, &ncache, cap, &error) : 0;
+                if (sym) {
+                    l->imports_host++;
+                    value = sym;                                   /* a host function: its stub, without the addend */
+                } else {
+                    if (!error)
+                        sym = (s->flags & LOADER_SYM_DEFINED) ? m->base + s->value
+                                                              : resolve_import(l, s->name, s->flags, cache, &ncache, cap, &error);
+                    value = sym ? sym + (uint64_t)(jump_slot ? 0 : rel->addend) : 0;   /* a weak import stays 0 */
+                }
             }
             memcpy((void *)(uintptr_t)(m->base + rel->where), &value, 8);
             l->relocs_applied++;
@@ -260,6 +297,8 @@ size_t loader_code(const Loader *l, LoaderCodeRange *ranges, uint64_t *hints, si
                 sym->value % 4 == 0)
                 hints[n++] = m->base + sym->value;
         }
+        if (m->has_init && n < max_hints) hints[n++] = m->init;
+        if (m->has_fini && n < max_hints) hints[n++] = m->fini;
         /* constructors (relocated: the slots hold absolute addresses now) */
         for (uint64_t k = 0; k < m->init_array_count && n < max_hints; k++) {
             uint64_t f;

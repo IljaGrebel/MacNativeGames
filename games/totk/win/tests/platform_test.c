@@ -36,7 +36,7 @@ static int fails;
 
 static uint64_t rd64(uint64_t a) { uint64_t v; memcpy(&v, (const void *)(uintptr_t)a, 8); return v; }
 static uint32_t rd32(uint64_t a) { uint32_t v; memcpy(&v, (const void *)(uintptr_t)a, 4); return v; }
-static int host_index(const char *name, void *ctx) { (void)ctx; return strcmp(name, "host_add") ? -1 : 7; }
+static int host_index(const char *name, int jump_slot, void *ctx) { (void)ctx; (void)jump_slot; return strcmp(name, "host_add") ? -1 : 7; }
 
 /* the GOT slot that holds `symbol`: the relocated word equal to its address */
 static int points_to(const LoadedModule *m, uint64_t target) {
@@ -64,7 +64,7 @@ int main(int argc, char **argv) {
     /* module loader */
     Loader l;
     const char *paths[] = {argv[1], argv[2]};
-    if (loader_load(&l, paths, 2, 0, host_index, NULL)) { printf("FAIL load: %s\n", l.error); return 1; }
+    if (loader_load(&l, paths, 2, 0, 8, host_index, NULL)) { printf("FAIL load: %s\n", l.error); return 1; }
     const LoadedModule *mainm = &l.modules[0], *sdk = &l.modules[1];
     CHECK(!strcmp(mainm->name, "main") && !strcmp(sdk->name, "sdk"), "module names main, sdk");
     CHECK(l.relocs_applied == 10 && l.imports_module == 3 && l.imports_host == 1, "10 relocations, 3 module and 1 host import");
@@ -75,9 +75,11 @@ int main(int argc, char **argv) {
     CHECK(rd64(table) >= mainm->base && rd64(table) < mainm->base + mainm->text_size &&
           rd64(table + 8) >= mainm->base && rd64(table + 8) < mainm->base + mainm->text_size, "RELATIVE function pointers in main");
     CHECK(rd64(loader_symbol(&l, "imported_pointer")) == sdk_mul, "ABS64 against an import");
-    CHECK(rd32(l.stubs) == (0xD4000001u | ((LOADER_SVC_HOST + 7) << 5)) && rd32(l.stubs + 4) == 0xD65F03C0u,
-          "host stub: svc #0x1007; ret");
-    CHECK(points_to(mainm, l.stubs), "main's host_add slot holds the stub");
+    uint64_t stub7 = loader_host_stub(&l, 7);
+    CHECK(stub7 == l.stubs + 56 && rd32(stub7) == (0xD4000001u | ((LOADER_SVC_HOST + 7) << 5)) && rd32(stub7 + 4) == 0xD65F03C0u,
+          "host stub 7: svc #0x1007; ret");
+    CHECK(loader_host_stub(&l, 8) == 0, "no stub past the host functions");
+    CHECK(points_to(mainm, stub7), "main's host_add slot holds the stub");
     uint64_t init = rd64(sdk->base + sdk->init_array_off);
     CHECK(sdk->init_array_count == 1 && init >= sdk->base && init < sdk->base + sdk->text_size, "sdk init array relocated (RELR)");
     CHECK(loader_seal(&l) == 0 && is_read_only(mainm->base) && is_read_only(l.stubs), "text and stubs read-only after sealing");
@@ -102,7 +104,7 @@ int main(int argc, char **argv) {
     fwrite(buf, 1, size, f);
     fclose(f);
     const char *bad_paths[] = {bad, argv[2]};
-    CHECK(loader_load(&l, bad_paths, 2, 0, host_index, NULL) != 0, "damaged manifest refused: %s", l.error);
+    CHECK(loader_load(&l, bad_paths, 2, 0, 8, host_index, NULL) != 0, "damaged manifest refused: %s", l.error);
     remove(bad);
 
     printf(fails ? "FAILED (%d)\n" : "all passed\n", fails);

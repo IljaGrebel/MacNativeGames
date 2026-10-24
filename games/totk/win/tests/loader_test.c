@@ -23,7 +23,8 @@ static long host_add(long a, long b) { return a + b; }
 static void *host_function(const char *name) { return strcmp(name, "host_add") ? NULL : (void *)host_add; }
 void bridge_missing(const char *name) { fprintf(stderr, "bridge: %s has no host function\n", name); exit(2); }
 
-static int resolve(const char *name, void *ctx) {
+static int resolve(const char *name, int jump_slot, void *ctx) {
+    (void)jump_slot;
     (void)ctx;
     if (no_host) return -1;
     for (unsigned i = 0; i < bridge_nvn_count; i++)
@@ -56,7 +57,7 @@ int main(int argc, char **argv) {
 
     if (bridge_nvn_bind(host_function)) { fprintf(stderr, "bridge bind\n"); return 1; }
     const char *paths[] = {argv[1], argv[2]};
-    if (loader_load(&loader, paths, 2, 0, resolve, NULL)) { fprintf(stderr, "load: %s\n", loader.error); return 1; }
+    if (loader_load(&loader, paths, 2, 0, bridge_nvn_count, resolve, NULL)) { fprintf(stderr, "load: %s\n", loader.error); return 1; }
     CHECK(loader.base && loader.base + loader.size <= GM_ADDRESS_LIMIT, "modules at %#llx (+%#llx), below 2^39",
           (unsigned long long)loader.base, (unsigned long long)loader.size);
     CHECK(loader.modules[1].base % LOADER_MODULE_ALIGN == 0 && loader.modules[1].base > loader.modules[0].base,

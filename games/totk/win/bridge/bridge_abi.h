@@ -60,6 +60,19 @@ static inline void br_store_struct(GuestCpu *c, const void *src, unsigned size) 
     if (size > 8) c->x[1] = buf[1];
 }
 
+/* Homogeneous floating-point aggregates (up to four float or double members) travel one member per V register
+   (AAPCS64 B.6 / C.4): member k in the low bits of v[first + k]. */
+static inline void *br_load_hfa(const GuestCpu *c, unsigned first, unsigned count, unsigned lane, uint64_t *buf) {
+    for (unsigned k = 0; k < count; k++) memcpy((uint8_t *)buf + k * lane, &c->v[first + k], lane);
+    return buf;
+}
+static inline void br_store_hfa(GuestCpu *c, const void *src, unsigned count, unsigned lane) {
+    for (unsigned k = 0; k < count; k++) {
+        memset(&c->v[k], 0, sizeof c->v[k]);
+        memcpy(&c->v[k], (const uint8_t *)src + k * lane, lane);
+    }
+}
+
 /* Floating-point arguments and results live in the low bits of v0..v7. */
 static inline float br_s(const GuestCpu *c, unsigned i) { float v; memcpy(&v, &c->v[i], sizeof v); return v; }
 static inline double br_d(const GuestCpu *c, unsigned i) { double v; memcpy(&v, &c->v[i], sizeof v); return v; }

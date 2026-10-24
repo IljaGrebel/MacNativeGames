@@ -5,8 +5,9 @@ Each module is a position-independent AArch64 shared object linked with module.l
 offsets, MOD0 in crt0.S) and converted to an NSO with LZ4-compressed segments and their SHA-256 digests, the way the
 Switch toolchain lays modules out. Needs clang and ld.lld that can target aarch64, and the lz4 Python package.
 
-usage: make_test_nso.py OUT_DIR [--clang clang] [--lld ld.lld]
-writes OUT_DIR/sdk.nso and OUT_DIR/main.nso
+usage: make_test_nso.py OUT_DIR [--clang clang] [--lld ld.lld] [--set link|boot]
+writes OUT_DIR/sdk.nso and OUT_DIR/main.nso: the "link" set (sdk.c, main.c) tests linking and calls, the "boot" set
+(bootsdk.c, bootmain.c) the runtime's startup path
 """
 import argparse, hashlib, struct, subprocess, sys
 from pathlib import Path
@@ -14,13 +15,14 @@ from pathlib import Path
 import lz4.block
 
 HERE = Path(__file__).resolve().parent
+SOURCES: dict[str, str] = {}
 CFLAGS = ['--target=aarch64-linux-gnu', '-mcpu=cortex-a57', '-ffreestanding', '-fPIC', '-O2',
           '-fno-stack-protector', '-funwind-tables', '-fasynchronous-unwind-tables']
 
 
 def build_elf(name, clang, lld, out, relr):
     objs = []
-    for src in ('crt0.S', f'{name}.c'):
+    for src in ('crt0.S', f'{SOURCES[name] if name in SOURCES else name}.c'):
         obj = out / f'{name}.{Path(src).stem}.o'
         subprocess.run([clang, *CFLAGS, '-c', str(HERE / src), '-o', str(obj)], check=True)
         objs.append(str(obj))
@@ -81,7 +83,11 @@ def main(argv=None):
     ap.add_argument('out', type=Path)
     ap.add_argument('--clang', default='clang')
     ap.add_argument('--lld', default='ld.lld')
+    ap.add_argument('--set', choices=('link', 'boot'), default='link')
     a = ap.parse_args(argv)
+    SOURCES.clear()
+    if a.set == 'boot':
+        SOURCES.update({'sdk': 'bootsdk', 'main': 'bootmain'})
     a.out.mkdir(parents=True, exist_ok=True)
     # sdk packs its RELATIVE relocations as DT_RELR, as the 1.4.3 SDK modules do; main keeps RELA
     for name, relr in (('sdk', True), ('main', False)):

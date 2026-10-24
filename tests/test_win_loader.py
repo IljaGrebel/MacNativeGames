@@ -137,6 +137,48 @@ class PlatformTests(_Fixtures):
         self.assertIn("16 x 0x10000", r.stdout)   # Windows' 64 KiB reservation granularity was in effect
 
 
+TOTK = ROOT / "games/totk"
+COMPAT = ["-include", str(WIN / "compat/win_compat.h"), f"-I{WIN / 'compat/include'}",
+          f"-I{TOTK / 'third_party/d2r_gfx/gfx/nvn/include'}", f"-I{TOTK / 'runtime'}", f"-I{WIN / 'runtime'}"]
+PROBE_SOURCES = [TOTK / "scripts/thread_probe.c", TOTK / "runtime/threads.c", WIN / "runtime/thread_enter.c",
+                 WIN / "compat/compat.c", WIN / "runtime/guest_mem.c"]
+
+
+class UpstreamThreadProbeTests(unittest.TestCase):
+    """The upstream runtime's own thread test (scripts/thread_probe.c) on the unchanged runtime/threads.c, with this
+    port's compatibility layer and thread entry: 32 threads with events, waits, priorities and ExitThread."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_host(self):
+        cc = _tool("clang-20", "clang", "cc")
+        if not cc:
+            self.skipTest("no C compiler")
+        exe = self.tmp / "thread_probe"
+        subprocess.run([cc, "-std=c11", "-O1", "-Wno-format", *COMPAT, *map(str, PROBE_SOURCES), "-lpthread", "-o",
+                        str(exe)], check=True, capture_output=True)
+        r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr[-2000:])
+        self.assertIn('"status":"pass"', r.stdout)
+        self.assertIn('"native_threads":32', r.stdout)
+
+    def test_windows_under_wine(self):
+        mingw = _tool("x86_64-w64-mingw32-gcc")
+        wine = _tool("wine64", "wine") or ("/usr/lib/wine/wine64" if Path("/usr/lib/wine/wine64").exists() else None)
+        if not mingw or not wine:
+            self.skipTest("no MinGW or Wine")
+        exe = self.tmp / "thread_probe.exe"
+        subprocess.run([mingw, "-std=c11", "-O1", *COMPAT, f"-I{WIN / 'compat/include_win'}", *map(str, PROBE_SOURCES),
+                        str(WIN / "compat/compat_win.c"), "-lbcrypt", "-static", "-lpthread", "-o", str(exe)],
+                       check=True, capture_output=True)
+        r = subprocess.run([wine, str(exe)], capture_output=True, text=True, env=dict(os.environ, WINEDEBUG="-all"),
+                           cwd=self.tmp, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr[-2000:])
+        self.assertIn('"native_threads":32', r.stdout)
+
+
 class RecompiledTests(_Fixtures):
     @classmethod
     def setUpClass(cls):
@@ -164,6 +206,46 @@ class RecompiledTests(_Fixtures):
         r = self._run("--no-host")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("unresolved import called: host_add", r.stdout)
+
+
+class BootTests(unittest.TestCase):
+    """totk-win (the upstream runtime on the recompiler) boots synthetic modules that walk the real SDK's startup:
+    nn::init::Start with the host's callbacks, module constructors, Horizon SVCs through the upstream dispatcher, a
+    guest thread through threads.c, a host replacement and the NVN entry. Needs SNX_RECOMPILER_PREFIX."""
+
+    @classmethod
+    def setUpClass(cls):
+        prefix = os.environ.get("SNX_RECOMPILER_PREFIX")
+        if not prefix:
+            raise unittest.SkipTest("SNX_RECOMPILER_PREFIX not set (ScarletNX recompiler library)")
+        tools = _aarch64_tools()
+        if not tools:
+            raise unittest.SkipTest("no clang/ld.lld for aarch64")
+        cls.tmp = Path(tempfile.mkdtemp())
+        _load("make_test_nso", FIXTURES / "make_test_nso.py").main(
+            [str(cls.tmp / "nso"), "--clang", tools[0], "--lld", tools[1], "--set", "boot"])
+        if _load("nso_manifest", WIN / "tools/nso_manifest.py").main(
+                [str(cls.tmp / "nxm"), str(cls.tmp / "nso/main.nso"), str(cls.tmp / "nso/sdk.nso")]):
+            raise RuntimeError("nso_manifest failed")
+        build = cls.tmp / "build"
+        subprocess.run(["cmake", "-S", str(WIN), "-B", str(build), f"-DCMAKE_C_COMPILER={tools[0]}",
+                        f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_BUILD_TYPE=Release",
+                        f"-DPython3_EXECUTABLE={sys.executable}"], check=True, capture_output=True)
+        subprocess.run(["cmake", "--build", str(build), "--target", "totk-win"], check=True, capture_output=True)
+        cls.exe = build / "totk-win"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_boot_walks_the_sdk_startup(self):
+        r = subprocess.run([str(self.exe), str(self.tmp / "nxm/main.nxm"), str(self.tmp / "nxm/sdk.nxm")],
+                           capture_output=True, text=True, timeout=300, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr[-3000:])
+        self.assertIn("BOOTTEST ok=7f", r.stderr)          # all seven steps
+        self.assertIn("rtld callback: modules linked", r.stderr)
+        self.assertIn('nvnBootstrapLoader(', r.stderr)
+        self.assertIn('"nvnDeviceInitialize"', r.stderr)
 
 
 if __name__ == "__main__":

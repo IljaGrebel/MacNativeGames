@@ -64,17 +64,46 @@ Relaxed floating point is the largest single performance item found so far for t
 
 | Step | State | Tested by |
 | --- | --- | --- |
-| Bridge generator (guest -> host calls) | done | `tests/test_win_bridge.py` |
+| Bridge generator for NVN (`bridge/gen_bridge.py`) | done: 472 of 477 functions | `tests/test_win_bridge.py` |
+| Host-function bridge (`bridge/gen_host_bridge.py`) | done: every `*_override` / `runtime_observer` entry of the boot set (135) from Clang's AST | boot test |
 | Recompiler check (ScarletNX) | done | `probes/recomp_e2e` |
-| NSO -> load manifest (`tools/nso_manifest.py`) | done: RELA, JMPREL, RELR; exports, imports, eh_frame_hdr hints, init array | `tests/test_win_loader.py` |
-| Guest memory (`runtime/guest_mem.c`) | done: Windows (VirtualAlloc) and POSIX | Linux, and the Windows build under Wine |
-| Module loader (`runtime/module_loader.c`) | done: placement, linking, host and trap stubs, sealing, damaged-file checks | Linux, and the Windows build under Wine |
-| Recompile and run (`runtime/recomp_host.c`) | done for synthetic modules: constructors, cross-module calls, host calls | `tests/test_win_loader.py` with `SNX_RECOMPILER_PREFIX` |
-| Horizon SVCs, threads, TLS | next | |
-| First boot on real TotK modules | needs the player's dump | |
+| NSO -> load manifest (`tools/nso_manifest.py`) | done: RELA, JMPREL, RELR, DT_INIT/DT_FINI, eh_frame_hdr hints | `tests/test_win_loader.py` |
+| Guest memory, module loader | done: host implementations first (as the Mac loader), one stub per host function | Linux, and the Windows build under Wine |
+| Upstream runtime on the port (`compat/`) | done: 20 runtime files build unchanged on Linux and for Windows (MinGW) | thread probe on Linux and under Wine; boot test |
+| Threads, TLS, SVCs, host <-> guest calls, boot (`runtime/host_runtime.c`) | done | boot test: `BOOTTEST ok=7f` |
+| M0 platform: NVN call trace, no window, silent audio (`runtime/platform_m0.c`) | done | boot test |
+| **First boot on real TotK modules** | **needs the player's dump: `tools/first_run.sh`** | |
 
 The synthetic modules (`tests/fixtures`) are C written for the tests, linked like Horizon modules (MOD0, three
-page-aligned segments, LZ4-compressed NSO): no game content.
+page-aligned segments, LZ4-compressed NSO): no game content. The boot set (`bootsdk.c`, `bootmain.c`) walks the SDK's
+startup: `nn::init::Start` with the host's callbacks, module constructors, GetInfo / SetHeapSize / CreateThread /
+StartThread / WaitSynchronization / ExitThread through the upstream dispatcher, a host replacement and the NVN entry.
+
+## How the upstream runtime runs here
+
+The Mac runtime (`games/totk/runtime`) is compiled as it is. `compat/win_compat.h` is force-included and
+`compat/include` (and `compat/include_win` on Windows) stands in for the Apple and POSIX headers it uses: Mach VM calls
+over guest_mem, CommonCrypto SHA-256 over CNG, CoreFoundation's locale, AudioToolbox's output unit (a silent clock in
+M0), Darwin's `stat` fields, `struct tm` with `tm_gmtoff`, `pread`, `flock`, directories with `d_type`. One finding:
+the runtime treats pthread key 0 as "not created" (Darwin never returns 0); `compat.c` takes key 0 at start.
+
+What the Mac does in `loader.c`, `hle_stack.c`, `thread_enter.S`, `frontend.m` and the Metal layer is in `runtime/`:
+`host_runtime.c` (loading, CPU state and Horizon TLR per thread, SVC dispatch, x86 thunks for host code that calls
+game functions, module memory calls, the boot), `thread_enter.c` (thread entry / ExitThread without unwinding through
+recompiled frames), `platform_m0.c` (the M0 platform).
+
+## First run (M0: boot without graphics)
+
+On Linux x86-64 or WSL2 (Ubuntu 24.04) on Windows, with the base game 1.0.0 dumped from your own console:
+
+```sh
+git clone -b windows https://github.com/IljaGrebel/MacNativeGames && cd MacNativeGames
+games/totk/win/tools/first_run.sh /mnt/c/Games/TotK.xci /mnt/c/Switch/prod.keys
+```
+
+It installs the tools, builds the recompiler library at the pinned commit, extracts and verifies ExeFS, RomFS (about
+17 GB, a few minutes) and the fonts with the upstream scripts, builds `totk-win` and boots. The log is
+`games/totk/win-first-run.log`. The goal of M0: the game starts and the log shows its first NVN calls.
 
 ## Settings in the game's own menu
 

@@ -15,6 +15,9 @@ One file per module, `<name>.nxm`, little-endian:
     strings       strtab_size bytes (NUL-terminated names)
     image         image_size bytes, at image_offset (16-aligned): text, rodata and data, without bss
 
+The header ends with DT_INIT and DT_FINI (module offsets, 0xFFFFFFFF when absent): Nintendo's modules run their
+constructors from DT_INIT, which the SDK's startup calls through the host.
+
 All offsets in the tables are module-relative. A summary of every module goes to manifest.json for people and tests.
 Runs on the player's own files at build time; nothing it writes is distributed.
 
@@ -35,12 +38,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'third_party' / 'd2
 from relr import decode_relr  # noqa: E402  (MIT, from d2r-mobile, as the Mac loader uses it)
 
 MAGIC = b'NXM1'
-NXM_HEADER = struct.Struct('<4sIIIQQQQQQQQQQIIIIQ')   # see write_module for the field order
-assert NXM_HEADER.size <= 128
+VERSION = 2
+NXM_HEADER = struct.Struct('<4sIIIQQQQQQQQQQIIIIQII')   # see write_module for the field order
+assert NXM_HEADER.size == 128
 HEADER_SIZE = 128
 RELOC = struct.Struct('<QIIq')
 SYMBOL = struct.Struct('<IIQ')
 NO_SYMBOL = 0xFFFFFFFF
+NO_INIT = 0xFFFFFFFF   # no DT_INIT / DT_FINI
 
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
 SUPPORTED_RELOCS = {R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE}
@@ -158,7 +163,8 @@ def parse_module(raw: bytes, name: str) -> dict:
 
     return {'name': name, 'image': image, 'segments': segs, 'bss': bss, 'build_id': build_id.hex(),
             'relocs': relocs, 'symbols': symbols, 'hints': sorted(h for h in hints if h % 4 == 0),
-            'init_array': init_array, 'needed': [cstr(n) for n in needed]}
+            'init_array': init_array, 'init': tags.get(DT['INIT'], NO_INIT), 'fini': tags.get(DT['FINI'], NO_INIT),
+            'needed': [cstr(n) for n in needed]}
 
 
 def func_starts(image: bytes, mod0: int, text_end: int) -> list[int]:
@@ -214,9 +220,9 @@ def write_module(m: dict, path: Path) -> dict:
     tables = HEADER_SIZE + len(rel_blob) + len(sym_blob) + len(hint_blob) + len(strings)
     image_offset = (tables + 15) & ~15
     (t, ts), (r, rs), (d, ds) = m['segments']
-    header = NXM_HEADER.pack(MAGIC, 1, name_off, 0, len(m['image']), m['bss'], t, ts, r, rs, d, ds,
+    header = NXM_HEADER.pack(MAGIC, VERSION, name_off, 0, len(m['image']), m['bss'], t, ts, r, rs, d, ds,
                              m['init_array'][0], m['init_array'][1], len(m['relocs']), len(m['symbols']),
-                             len(m['hints']), len(strings), image_offset)
+                             len(m['hints']), len(strings), image_offset, m['init'], m['fini'])
     blob = (header.ljust(HEADER_SIZE, b'\0') + rel_blob + sym_blob + hint_blob + bytes(strings)).ljust(image_offset, b'\0')
     path.write_bytes(blob + m['image'])
     by_type: dict[int, int] = {}
@@ -228,6 +234,7 @@ def write_module(m: dict, path: Path) -> dict:
             'imports': sorted(s['name'] for s in m['symbols'] if s['name'] and not s['defined']),
             'exports': len([s for s in m['symbols'] if s['name'] and s['defined']]),
             'hints': len(m['hints']), 'init_array': list(m['init_array']), 'needed': m['needed'],
+            'init': None if m['init'] == NO_INIT else m['init'], 'fini': None if m['fini'] == NO_INIT else m['fini'],
             'sha256': hashlib.sha256(m['image']).hexdigest()}
 
 
