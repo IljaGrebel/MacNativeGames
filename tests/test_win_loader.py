@@ -1,0 +1,170 @@
+"""Tests for the Windows port's module loading (games/totk/win): synthetic Horizon modules built from C written for the
+tests (no game content), turned into load manifests, loaded and linked, and - when the recompiler is installed - run.
+
+Layers, each skipped when its tools are missing:
+  * nso_manifest.py on the synthetic NSOs (needs clang and ld.lld that target aarch64, and lz4);
+  * platform_test: guest memory and the loader in C, on the host, and as a Windows program under Wine;
+  * loader_test: the modules recompiled to x86-64 and run (needs ScarletNX's recompiler library: set
+    SNX_RECOMPILER_PREFIX to its install prefix).
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WIN = ROOT / "games/totk/win"
+FIXTURES = WIN / "tests/fixtures"
+
+
+def _load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _tool(*names: str) -> str | None:
+    for n in names:
+        p = shutil.which(n)
+        if p:
+            return p
+    return None
+
+
+def _aarch64_tools() -> tuple[str, str] | None:
+    clang = _tool("clang-20", "clang-19", "clang-18", "clang")
+    lld = _tool("ld.lld", "ld.lld-20", "ld.lld-19", "ld.lld-18")
+    if not clang or not lld:
+        return None
+    probe = subprocess.run([clang, "--target=aarch64-linux-gnu", "-ffreestanding", "-x", "c", "-c", "-o", os.devnull, "-"],
+                           input="int f(void){return 0;}", capture_output=True, text=True)
+    return (clang, lld) if probe.returncode == 0 else None
+
+
+class _Fixtures(unittest.TestCase):
+    """Builds the synthetic modules and their manifests once for the module."""
+    tmp: Path
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import lz4.block  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("lz4 not installed")
+        tools = _aarch64_tools()
+        if not tools:
+            raise unittest.SkipTest("no clang/ld.lld for aarch64")
+        cls.tmp = Path(tempfile.mkdtemp())
+        mk = _load("make_test_nso", FIXTURES / "make_test_nso.py")
+        mk.main([str(cls.tmp / "nso"), "--clang", tools[0], "--lld", tools[1]])
+        cls.manifest = _load("nso_manifest", WIN / "tools/nso_manifest.py")
+        rc = cls.manifest.main([str(cls.tmp / "nxm"), str(cls.tmp / "nso/main.nso"), str(cls.tmp / "nso/sdk.nso")])
+        if rc:
+            raise RuntimeError("nso_manifest failed")
+        cls.summary = {m["name"]: m for m in json.loads((cls.tmp / "nxm/manifest.json").read_text())["modules"]}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+
+class ManifestTests(_Fixtures):
+    def test_relocations_and_imports(self):
+        main, sdk = self.summary["main"], self.summary["sdk"]
+        self.assertEqual(main["relocs"], {"257": 1, "1025": 2, "1026": 2, "1027": 3})
+        self.assertEqual(main["imports"], ["host_add", "sdk_mul", "sdk_ready"])
+        self.assertEqual(sdk["relocs"], {"1025": 1, "1027": 1})   # the RELATIVE one came from DT_RELR
+        self.assertEqual(sdk["imports"], [])
+        self.assertEqual(main["init_array"][1], 1)
+        self.assertEqual(sdk["init_array"][1], 1)
+
+    def test_hints_include_eh_frame_starts(self):
+        m = self.manifest.parse_module((self.tmp / "nso/main.nso").read_bytes(), "main")
+        self.assertGreaterEqual(len(m["hints"]), 4)
+        self.assertTrue(all(h % 4 == 0 and h < m["segments"][0][1] for h in m["hints"]))
+        entry = next(s["value"] for s in m["symbols"] if s["name"] == "test_entry")
+        self.assertIn(entry, m["hints"])
+
+    def test_damaged_nso_is_refused(self):
+        raw = bytearray((self.tmp / "nso/main.nso").read_bytes())
+        raw[0xA0] ^= 1                                    # text segment digest
+        with self.assertRaises(self.manifest.ManifestError):
+            self.manifest.parse_module(bytes(raw), "main")
+        with self.assertRaises(self.manifest.ManifestError):
+            self.manifest.parse_module(b"NSO1" + bytes(raw[4:]), "main")
+
+
+class PlatformTests(_Fixtures):
+    def _build(self, cc: list[str], out: Path):
+        src = [WIN / "runtime/guest_mem.c", WIN / "runtime/module_loader.c", WIN / "tests/platform_test.c"]
+        subprocess.run([*cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", f"-I{WIN / 'runtime'}",
+                        f"-I{WIN / 'bridge'}", *map(str, src), "-o", str(out)], check=True)
+
+    def _nxm(self, name: str) -> str:
+        return str(self.tmp / "nxm" / f"{name}.nxm")
+
+    def test_host(self):
+        cc = _tool("cc", "clang", "gcc")
+        if not cc:
+            self.skipTest("no C compiler")
+        exe = self.tmp / "platform_test"
+        self._build([cc], exe)
+        r = subprocess.run([str(exe), self._nxm("main"), self._nxm("sdk")], capture_output=True, text=True, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_windows_under_wine(self):
+        mingw = _tool("x86_64-w64-mingw32-gcc")
+        wine = _tool("wine64", "wine") or ("/usr/lib/wine/wine64" if Path("/usr/lib/wine/wine64").exists() else None)
+        if not mingw or not wine:
+            self.skipTest("no MinGW or Wine")
+        exe = self.tmp / "platform_test.exe"
+        self._build([mingw], exe)
+        env = dict(os.environ, WINEDEBUG="-all")
+        r = subprocess.run([wine, str(exe), "Z:" + self._nxm("main").replace("/", "\\"),
+                            "Z:" + self._nxm("sdk").replace("/", "\\")], capture_output=True, text=True, env=env,
+                           cwd=self.tmp, timeout=300)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("all passed", r.stdout)
+        self.assertIn("16 x 0x10000", r.stdout)   # Windows' 64 KiB reservation granularity was in effect
+
+
+class RecompiledTests(_Fixtures):
+    @classmethod
+    def setUpClass(cls):
+        prefix = os.environ.get("SNX_RECOMPILER_PREFIX")
+        if not prefix:
+            raise unittest.SkipTest("SNX_RECOMPILER_PREFIX not set (ScarletNX recompiler library)")
+        super().setUpClass()
+        cc = _tool("clang-20", "clang")
+        build = cls.tmp / "build"
+        subprocess.run(["cmake", "-S", str(WIN), "-B", str(build), f"-DCMAKE_C_COMPILER={cc}",
+                        f"-DCMAKE_PREFIX_PATH={prefix}", "-DCMAKE_BUILD_TYPE=Release"], check=True, capture_output=True)
+        subprocess.run(["cmake", "--build", str(build), "--target", "loader_test"], check=True, capture_output=True)
+        cls.exe = build / "loader_test"
+
+    def _run(self, *extra):
+        return subprocess.run([str(self.exe), str(self.tmp / "nxm/main.nxm"), str(self.tmp / "nxm/sdk.nxm"), *extra],
+                              capture_output=True, text=True, timeout=600)
+
+    def test_modules_run_recompiled(self):
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("all passed", r.stdout)
+
+    def test_unresolved_import_stops_with_its_name(self):
+        r = self._run("--no-host")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("unresolved import called: host_add", r.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

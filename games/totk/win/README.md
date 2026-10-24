@@ -60,6 +60,31 @@ natively):
 
 Relaxed floating point is the largest single performance item found so far for the 13-16 W target.
 
+## Status
+
+| Step | State | Tested by |
+| --- | --- | --- |
+| Bridge generator (guest -> host calls) | done | `tests/test_win_bridge.py` |
+| Recompiler check (ScarletNX) | done | `probes/recomp_e2e` |
+| NSO -> load manifest (`tools/nso_manifest.py`) | done: RELA, JMPREL, RELR; exports, imports, eh_frame_hdr hints, init array | `tests/test_win_loader.py` |
+| Guest memory (`runtime/guest_mem.c`) | done: Windows (VirtualAlloc) and POSIX | Linux, and the Windows build under Wine |
+| Module loader (`runtime/module_loader.c`) | done: placement, linking, host and trap stubs, sealing, damaged-file checks | Linux, and the Windows build under Wine |
+| Recompile and run (`runtime/recomp_host.c`) | done for synthetic modules: constructors, cross-module calls, host calls | `tests/test_win_loader.py` with `SNX_RECOMPILER_PREFIX` |
+| Horizon SVCs, threads, TLS | next | |
+| First boot on real TotK modules | needs the player's dump | |
+
+The synthetic modules (`tests/fixtures`) are C written for the tests, linked like Horizon modules (MOD0, three
+page-aligned segments, LZ4-compressed NSO): no game content.
+
+## Settings in the game's own menu
+
+The port's settings (upscaler, frame generation, frame limit, language, device profile) will appear as entries in
+TotK's own options menu, not in a separate overlay. The Mac port already reads and edits the game's UI archives
+(`.blarc` / `.bflyt` / `.bflan`, `scripts/ultrawide_layout.py`, `scripts/make_romfs_patches.py`) and serves edited
+RomFS files at run time; the new entries need rows in the options layout, their labels in every language's message
+files, and code that handles them - the first target of the decompilation pipeline. Until the game runs, the
+settings are a configuration file; an overlay exists only for debugging before the game's menu is reachable.
+
 ## Decompilation pipeline (from M2)
 
 The recompiled game is the base and plays in full from the start. On top of it, functions move to native C++ one at
