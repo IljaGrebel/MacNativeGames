@@ -68,6 +68,8 @@ if(ScarletNXRecompiler_FOUND)
   if(WIN32)
     list(APPEND UPSTREAM_FLAGS -I${WIN_DIR}/compat/include_win)   # POSIX headers Windows lacks
     add_compile_definitions(_WIN32_WINNT=0x0A00)   # Windows 10: GetCurrentThreadStackLimits, WaitOnAddress
+    # MinGW's off_t is 32-bit by default: the RomFS (17 GB) is read with off_t offsets
+    add_compile_definitions(_FILE_OFFSET_BITS=64)
   endif()
   foreach(d ${TOTK_WIN_DEFINES})
     list(APPEND UPSTREAM_FLAGS -D${d})

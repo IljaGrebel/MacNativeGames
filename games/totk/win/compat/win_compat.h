@@ -18,6 +18,8 @@
 #include <io.h>
 #include <direct.h>
 #include <sys/types.h>
+/* The first run on the real game stopped at 2 GB into the RomFS hash: off_t wrapped (build with _FILE_OFFSET_BITS=64) */
+_Static_assert(sizeof(off_t) == 8, "64-bit off_t");
 typedef jmp_buf sigjmp_buf;
 /* POSIX calls MinGW's CRT lacks or spells differently (compat_win.c) */
 int compat_mkdir(const char *path, int mode);
