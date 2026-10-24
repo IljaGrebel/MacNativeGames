@@ -10,6 +10,7 @@
 #   LLVM_MINGW    llvm-mingw toolchain folder (default: downloaded, release 20250924)
 #   LLVM_WIN      LLVM for x86_64-w64-mingw32 with lib/cmake/llvm (default: built from 20.1.8, X86 only; hours)
 #   SNX_SRC       ScarletNX checkout (default: cloned at SNX_COMMIT)
+#   LLVM_AS       an llvm-as of LLVM 20 (default: llvm-as-20)
 #   SNX_DEPS      folder with xxhash/ and enet/ clones for ScarletNX's CPM (default: CPM downloads them)
 set -euo pipefail
 OUT=${1:?usage: make_package.sh OUT_DIR}
@@ -76,14 +77,18 @@ fi
 
 step "ScarletNX recompiler library ($SNX_COMMIT) for Windows"
 SNX_WIN=$WORK/snx-win
+# llvm-mingw's Clang is newer than the LLVM the recompiler links: its runtime-library bitcode is assembled from text
+# with an llvm-as of that LLVM's major version (any 20.x reads 20.1.8's format)
+LLVM_AS=${LLVM_AS:-$(command -v llvm-as-20 || echo /usr/lib/llvm-20/bin/llvm-as)}
 if [ ! -f "$SNX_WIN/lib/libscarletnx-recompiler.a" ]; then
   deps=()
   if [ -n "${SNX_DEPS:-}" ]; then deps=(-DCPM_xxhash_SOURCE="$SNX_DEPS/xxhash" -DCPM_enet_SOURCE="$SNX_DEPS/enet"); fi
   cmake -S "$SNX_SRC" -B "$WORK/snx-win-build" -G Ninja -DCMAKE_BUILD_TYPE=Release "${CROSS[@]}" \
     -DSNX_TOOLS_ONLY=ON -DSNX_BUILD_GNUABI=OFF -DSNX_BUILD_3DS=OFF -DSNX_BUILD_VITA=OFF -DBUILD_TESTING=OFF \
-    -DSNX_A64_DISASM=OFF -DLLVM_DIR="$LLVM_WIN/lib/cmake/llvm" "${deps[@]}"
+    -DSNX_A64_DISASM=OFF -DLLVM_DIR="$LLVM_WIN/lib/cmake/llvm" -DSNX_LLVM_AS="$LLVM_AS" "${deps[@]}"
   cmake --build "$WORK/snx-win-build" --target scarletnx-recompiler
-  cmake --install "$WORK/snx-win-build" --prefix "$SNX_WIN" >/dev/null
+  # the library's own install (the whole project's would also want scarletnx.exe, which a tools-only build lacks)
+  cmake -DCMAKE_INSTALL_PREFIX="$SNX_WIN" -P "$WORK/snx-win-build/host-tools/recompiler-library/cmake_install.cmake" >/dev/null
   test -f "$SNX_WIN/lib/libscarletnx-recompiler.a"
 fi
 

@@ -72,7 +72,8 @@ Relaxed floating point is the largest single performance item found so far for t
 | Upstream runtime on the port (`compat/`) | done: 20 runtime files build unchanged on Linux and for Windows (MinGW) | thread probe on Linux and under Wine; boot test |
 | Threads, TLS, SVCs, host <-> guest calls, boot (`runtime/host_runtime.c`) | done | boot test: `BOOTTEST ok=7f` |
 | M0 platform: NVN call trace, no window, silent audio (`runtime/platform_m0.c`) | done | boot test |
-| **First boot on real TotK modules** | **needs the player's dump: `tools/first_run.sh`** | |
+| Prebuilt Windows package (`package/`): `totk-win.exe` cross-built with llvm-mingw against a static LLVM 20 and ScarletNX for Windows, a portable CPython for the extraction scripts, `First-Run.cmd` | done | boot test of the `.exe` under Wine (recompile, then the code cache); upstream container tests and `nso_manifest` output on the bundled Python under Wine |
+| **First boot on real TotK modules** | **needs the player's dump: `First-Run.cmd` (Windows) or `tools/first_run.sh` (Linux)** | |
 
 The synthetic modules (`tests/fixtures`) are C written for the tests, linked like Horizon modules (MOD0, three
 page-aligned segments, LZ4-compressed NSO): no game content. The boot set (`bootsdk.c`, `bootmain.c`) walks the SDK's
@@ -94,7 +95,15 @@ recompiled frames), `platform_m0.c` (the M0 platform).
 
 ## First run (M0: boot without graphics)
 
-On Linux x86-64 or WSL2 (Ubuntu 24.04) on Windows, with the base game 1.0.0 dumped from your own console:
+On Windows: unpack the package (`package/make_package.sh OUT_DIR` builds it on Linux) and double-click
+`First-Run.cmd`. It asks for the base game 1.0.0 (XCI or NSP) and `prod.keys` dumped from your own console, prepares
+them with the bundled Python, boots and writes `first-run.log`. Nothing is installed; see `package/README.txt`.
+
+The prebuilt program reads `romfs_config.h` / `shared_fonts_config.h` at start (`TOTK_WIN_RUNTIME_CONFIG`,
+`runtime/game_config.c`) instead of compiling them in, so one `totk-win.exe` serves every dump; `shared_font.c` has a
+two-line seam for it. `TOTK_WIN_TRACE_SVC=1` logs every Horizon SVC with its arguments and result.
+
+On Linux x86-64 (or WSL2), building everything from source:
 
 ```sh
 git clone -b windows https://github.com/IljaGrebel/MacNativeGames && cd MacNativeGames

@@ -30,6 +30,14 @@ function(gen_bridge target protos include)
   target_sources(${target} PRIVATE ${out}/bridge_nvn.c)
 endfunction()
 
+# A static LLVM (the Windows package's) is named by library in the recompiler's link interface: LLVM's own package
+# turns those names into targets with their dependencies. A shared system LLVM (Linux) needs none of this.
+if(LLVM_DIR)
+  find_package(LLVM CONFIG QUIET)
+  if(LLVM_FOUND)
+    enable_language(CXX)   # static LLVM is C++: programs linking it link with the C++ driver and its runtime
+  endif()
+endif()
 find_package(ScarletNXRecompiler QUIET)
 if(ScarletNXRecompiler_FOUND)
   add_library(totkwin_recomp STATIC runtime/recomp_host.c)
@@ -57,6 +65,10 @@ if(ScarletNXRecompiler_FOUND)
   set(TOTK_WIN_DEFINES "" CACHE STRING "game version defines, as the Mac build passes them (e.g. TOTK_GAME_V143=1)")
   set(UPSTREAM_FLAGS "SHELL:-include ${WIN_DIR}/compat/win_compat.h" -I${WIN_DIR}/compat/include
       -I${TOTK_DIR}/third_party/d2r_gfx/gfx/nvn/include -I${RUNTIME_DIR} -I${TOTK_WIN_CONFIG_DIR})
+  if(WIN32)
+    list(APPEND UPSTREAM_FLAGS -I${WIN_DIR}/compat/include_win)   # POSIX headers Windows lacks
+    add_compile_definitions(_WIN32_WINNT=0x0A00)   # Windows 10: GetCurrentThreadStackLimits, WaitOnAddress
+  endif()
   foreach(d ${TOTK_WIN_DEFINES})
     list(APPEND UPSTREAM_FLAGS -D${d})
   endforeach()
@@ -99,6 +111,9 @@ if(ScarletNXRecompiler_FOUND)
   if(TOTK_WIN_RUNTIME_CONFIG)
     target_sources(totkwin_upstream PRIVATE runtime/game_config.c)
   endif()
+  if(WIN32)
+    target_sources(totkwin_upstream PRIVATE ${WIN_DIR}/compat/compat_win.c)
+  endif()
 
   add_executable(totk-win runtime/host_runtime.c runtime/thread_enter.c runtime/platform_m0.c runtime/totk_win_main.c
                  ${CMAKE_CURRENT_BINARY_DIR}/nvn_names.inc)
@@ -106,6 +121,9 @@ if(ScarletNXRecompiler_FOUND)
   target_include_directories(totk-win PRIVATE runtime ${BRIDGE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
   find_package(Threads REQUIRED)
   target_link_libraries(totk-win PRIVATE totkwin_upstream Threads::Threads m)
+  if(LLVM_FOUND)
+    set_target_properties(totk-win loader_test PROPERTIES LINKER_LANGUAGE CXX)
+  endif()
   if(WIN32)
     target_link_libraries(totk-win PRIVATE bcrypt)
     # keep the CRT heap and other host allocations bottom-up and low: guest-visible host memory must stay below 2^39

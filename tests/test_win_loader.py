@@ -287,5 +287,30 @@ class BootTests(unittest.TestCase):
         self.assertIn('"nvnDeviceInitialize"', r.stderr)
 
 
+class WindowsPackageTests(unittest.TestCase):
+    """The packaged totk-win.exe (package/make_package.sh: llvm-mingw, static LLVM, ScarletNX for Windows) boots the
+    synthetic modules under Wine, recompiling on Windows and then loading the code cache. Needs TOTK_WIN_PACKAGE_EXE."""
+
+    def test_package_exe_boots_under_wine(self):
+        exe = os.environ.get("TOTK_WIN_PACKAGE_EXE")
+        wine = _tool("wine64", "wine") or ("/usr/lib/wine/wine64" if Path("/usr/lib/wine/wine64").exists() else None)
+        tools = _aarch64_tools()
+        if not exe or not wine or not tools:
+            self.skipTest("TOTK_WIN_PACKAGE_EXE, Wine or the aarch64 tools missing")
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _load("make_test_nso", FIXTURES / "make_test_nso.py").main(
+            [str(tmp / "nso"), "--clang", tools[0], "--lld", tools[1], "--set", "boot"])
+        self.assertFalse(_load("nso_manifest", WIN / "tools/nso_manifest.py").main(
+            [str(tmp / "nxm"), str(tmp / "nso/main.nso"), str(tmp / "nso/sdk.nso")]))
+        win = lambda p: "Z:" + str(p).replace("/", "\\")
+        for run in ("recompile", "cache"):
+            r = subprocess.run([wine, exe, "--cache", win(tmp / "cache"), win(tmp / "nxm/main.nxm"), win(tmp / "nxm/sdk.nxm")],
+                               capture_output=True, text=True, timeout=900, cwd=tmp,
+                               env={**os.environ, "WINEDEBUG": "-all"})
+            self.assertEqual(r.returncode, 0, f"{run}: {r.stderr[-3000:]}")
+            self.assertIn("BOOTTEST ok=7f", r.stderr, run)
+
+
 if __name__ == "__main__":
     unittest.main()

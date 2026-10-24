@@ -268,7 +268,15 @@ static void svc_entry(CPU *c, uint32_t imm) {
     const char *module = "?";
     uint64_t offset = c->pc;
     runtime_module_offset(c->pc, &module, &offset);
+    static int trace = -1;   /* TOTK_WIN_TRACE_SVC=1: every Horizon SVC with its arguments and result */
+    if (trace < 0) trace = getenv("TOTK_WIN_TRACE_SVC") != NULL;
+    if (trace)
+        fprintf(stderr, "[svc] %#x(%#llx, %#llx, %#llx, %#llx) from %s+%#llx\n", imm, (unsigned long long)c->x[0],
+                (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3], module,
+                (unsigned long long)offset);
     runtime_svc(imm, c->x, module, offset);
+    if (trace)
+        fprintf(stderr, "[svc] %#x -> %#llx, %#llx\n", imm, (unsigned long long)c->x[0], (unsigned long long)c->x[1]);
 }
 
 /* ---- module memory (services.c) ---- */
