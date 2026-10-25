@@ -69,12 +69,16 @@ games/totk/win/package/make_package.sh OUT_DIR    # then: cd OUT_DIR/.. && zip -
 Under Wine the packaged exe is checked by `WindowsPackageTests`. Windows PowerShell does not run under Wine here, so
 `First-Run.ps1` is only parsed (pwsh) and reviewed for Windows PowerShell 5.1.
 
-## Status (2026-10-24)
+## Status (2026-10-25)
 
-- M0 (boot without graphics) implemented. Synthetic SDK startup passes on Linux and as the Windows `.exe` under Wine
-  (`BOOTTEST ok=7f`, then from the code cache).
-- Package `TotK-Win-M0.zip` (commit 42dd2fc) sent to the player. **Waiting for `first-run.log` from the first run on
-  the real game** (never run on real TotK modules yet).
+- M0 (boot without graphics) implemented. Synthetic SDK startup passes on Linux and as the Windows `.exe` under Wine.
+- Real game (player's ROG Ally, NSP 1.0.0, no shared fonts): 294070 functions recompiled in 500-617 s, 0 unresolved
+  imports, SDK init, RomFS verified (17 GB), module constructors, `nnMain`, first NVN calls
+  (`nv::SetGraphicsAllocator`, `nv::InitializeGraphics`). Fixed on the way: 32-bit `off_t` (RomFS hash stopped at
+  2 GB). Then it stopped at `sm: service "vi:m" not implemented`.
+- Since that log (not yet run on the real game): `nn::vi` overrides in `platform_m0.c` (as `frontend.m`, no window,
+  vsync event at 60 Hz) and modules at the fixed address 0x200000000, so the code cache stays valid across builds (the
+  lowest free range moved 0x9c00000 -> 0x9e00000 between builds and forced a full recompile).
 
 ## Next
 

@@ -6,11 +6,14 @@
  *     neutral value (Initialize functions succeed, getters return 0). nvnBootstrapLoader and nvnDeviceGetProcAddress
  *     hand out the guest stubs of these functions, as the real NVN layer hands out its implementations. The Vulkan
  *     NVN layer (M1) replaces this file's graphics half.
+ *   - display (nn::vi): the overrides frontend.m has, without a window; the vsync event is signalled at 60 Hz;
  *   - window and boot screen: progress goes to the log;
  *   - input: no controller (neutral state); rumble does nothing;
  *   - movies and Opus: not overridden (the game's own decoders run).
  */
+#include <pthread.h>
 #include <stdatomic.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,9 +80,77 @@ void *runtime_gfx_override(const char *name) {
     return NULL;
 }
 
+/* ---- display (nn::vi): what frontend.m overrides, so the SDK never opens vi:m ---- */
+
+enum { VI_INIT, VI_OPEN, VI_LAYER, VI_WINDOW, VI_VSYNC, VI_SCALING, NVI };
+static const char *const g_vi_names[NVI] = {
+    "_ZN2nn2vi10InitializeEv",
+    "_ZN2nn2vi18OpenDefaultDisplayEPPNS0_7DisplayE",
+    "_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE",
+    "_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE",
+    "_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE",
+    "_ZN2nn2vi19SetLayerScalingModeEPNS0_5LayerENS0_11ScalingModeE",
+};
+void hle_signal_system_event(void *event);   /* threads.c */
+static char g_vi_token[NVI];
+/* handles the game holds: display, layer and native window (the window goes to nvnWindowBuilderSetNativeWindow) */
+static uint64_t g_display, g_layer, g_window;
+static pthread_mutex_t g_vsync_lock = PTHREAD_MUTEX_INITIALIZER;
+static void *g_vsync_events[16];
+static unsigned g_vsync_count;
+#define VI_RESULT_INVALID 0xf601u   /* what frontend.m returns for a bad argument */
+
+static void *vsync_thread(void *arg) {
+    (void)arg;
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (;;) {
+        next.tv_nsec += 1000000000L / 60;
+        while (next.tv_nsec >= 1000000000L) { next.tv_nsec -= 1000000000L; next.tv_sec++; }
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        pthread_mutex_lock(&g_vsync_lock);
+        for (unsigned i = 0; i < g_vsync_count; i++) hle_signal_system_event(g_vsync_events[i]);
+        pthread_mutex_unlock(&g_vsync_lock);
+    }
+    return NULL;
+}
+
+static void vi_adapter(GuestCpu *c) {
+    const char *name = host_runtime_calling();
+    unsigned i = 0;
+    while (i < NVI && strcmp(g_vi_names[i], name)) i++;
+    uint64_t *out = (uint64_t *)(uintptr_t)c->x[0];
+    uint32_t r = 0;
+    switch (i) {
+    case VI_INIT: fprintf(stderr, "[totk-win] VI display initialized (no window in M0)\n"); break;
+    case VI_OPEN: if (out) *out = (uintptr_t)&g_display; else r = VI_RESULT_INVALID; break;
+    case VI_LAYER: if (out && c->x[1] == (uintptr_t)&g_display) *out = (uintptr_t)&g_layer; else r = VI_RESULT_INVALID; break;
+    case VI_WINDOW: if (out && c->x[1] == (uintptr_t)&g_layer) *out = (uintptr_t)&g_window; else r = VI_RESULT_INVALID; break;
+    case VI_VSYNC: {
+        void *ev = (void *)(uintptr_t)c->x[0];
+        if (!ev || c->x[1] != (uintptr_t)&g_display) { r = VI_RESULT_INVALID; break; }
+        hle_bind_system_event(ev, 1);   /* on the guest thread, as the SDK code it runs needs */
+        pthread_mutex_lock(&g_vsync_lock);
+        if (g_vsync_count >= 16) runtime_fail("VI display event limit");
+        g_vsync_events[g_vsync_count++] = ev;
+        int first = g_vsync_count == 1;
+        pthread_mutex_unlock(&g_vsync_lock);
+        pthread_t t;
+        if (first && (pthread_create(&t, NULL, vsync_thread, NULL) || pthread_detach(t))) runtime_fail("vsync thread");
+        break;
+    }
+    case VI_SCALING: break;
+    default: runtime_fail("VI: unknown function");
+    }
+    fprintf(stderr, "[totk-win] vi %s(%#llx, %#llx) -> %#x\n", name, (unsigned long long)c->x[0],
+            (unsigned long long)c->x[1], r);
+    c->x[0] = r;
+}
+
 void host_runtime_register_platform(void) {
     for (unsigned i = 0; i < NNVN; i++)
         g_nvn_index[i] = (int)host_runtime_register(g_nvn_names[i], &g_nvn_token[i], nvn_trace_adapter);
+    for (unsigned i = 0; i < NVI; i++) host_runtime_register(g_vi_names[i], &g_vi_token[i], vi_adapter);
 }
 
 unsigned long host_platform_nvn_calls(void) { return atomic_load(&g_nvn_calls); }
@@ -106,7 +177,11 @@ void runtime_boot_progress(const char *stage, uint64_t done, uint64_t total) {
         fprintf(stderr, "[boot] %s %llu/%llu\n", stage, (unsigned long long)done, (unsigned long long)total);
     }
 }
-void *runtime_front_override(const char *name) { (void)name; return NULL; }
+void *runtime_front_override(const char *name) {
+    for (unsigned i = 0; i < NVI; i++)
+        if (!strcmp(g_vi_names[i], name)) return &g_vi_token[i];
+    return NULL;
+}
 int runtime_front_focus(void) { return 1; }   /* nn::oe focus state: in focus */
 void runtime_front_request_close(void) {}
 void runtime_front_text_test(const char *op, const char *text) { (void)op; (void)text; }

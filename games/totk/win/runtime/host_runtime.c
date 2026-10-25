@@ -438,6 +438,8 @@ static void guest_wfe(CPU *c) {
 
 /* ---- loading and boot ---- */
 
+#define HOST_MODULE_BASE 0x200000000ull   /* below the runtime's low region (from 0x300000000) */
+
 int host_runtime_load(const char *const *paths, unsigned count, const char *cache_dir) {
     for (unsigned i = 0; i < 8; i++)
         if (pthread_key_create(&runtime_keys[i], NULL)) runtime_fail("thread keys");
@@ -445,7 +447,10 @@ int host_runtime_load(const char *const *paths, unsigned count, const char *cach
         for (const HostBridgeEntry *e = *t; e->name; e++) host_add(e->name, e->fn, e->adapter);
     host_runtime_register_platform();
     host_runtime_register_boot_callbacks();
-    if (loader_load(&g_loader, paths, count, 0, g_nhost, resolve, NULL)) {
+    /* A fixed address keeps the code cache valid: the relocated code depends on it, and the lowest free range moves
+       with the exe and the DLLs Windows maps (0x9c00000, then 0x9e00000 on the player's machine: a full recompile) */
+    if (loader_load(&g_loader, paths, count, HOST_MODULE_BASE, g_nhost, resolve, NULL) &&
+        loader_load(&g_loader, paths, count, 0, g_nhost, resolve, NULL)) {
         fprintf(stderr, "[totk-win] %s\n", g_loader.error);
         return -1;
     }
